@@ -12,6 +12,10 @@ require('./check-source-resources')('dist')
 const options = {
   appId: 'cn.toside.music.desktop',
   productName: 'lx-music-desktop',
+  // Native dependencies are shipped from their verified prebuilds below.
+  // Rebuilding optional websocket accelerators would unnecessarily require
+  // a local Python/MSVC toolchain on Windows.
+  npmRebuild: false,
   electronDist: process.env.ELECTRON_OVERRIDE_DIST_PATH,
   beforePack,
   afterPack,

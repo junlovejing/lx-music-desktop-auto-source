@@ -58,17 +58,46 @@ test('upgrading removes previously bundled and virtual entries, preserves import
   assert.deepEqual(apis.getUserApis().map(x => x.id), ['user_api_local'])
 })
 test('subscription validates both formats and preserves imports and ordering', async() => {
-  const { parseRemoteSources } = loader()('src/common/sources/user/failover.ts')
+  const { isRemoteSourceUrl, parseRemoteSources } = loader()('src/common/sources/user/failover.ts')
   const rows = [{ id: 'test', name: 'Test', url: 'https://example.com/test.js' }]
   assert.deepEqual(parseRemoteSources(rows), rows)
   assert.deepEqual(parseRemoteSources({ sources: rows }), rows)
   assert.equal(parseRemoteSources({ sources: [rows[0], rows[0]] }), null)
   assert.equal(parseRemoteSources([{ ...rows[0], url: 'http://example.com/test.js' }]), null)
+  assert.equal(isRemoteSourceUrl('http://192.168.2.9:19528/test.js'), true)
+  assert.equal(isRemoteSourceUrl('http://10.0.0.8/test.js'), true)
+  assert.equal(isRemoteSourceUrl('http://172.31.255.254/test.js'), true)
+  assert.equal(isRemoteSourceUrl('http://172.32.0.1/test.js'), false)
+  assert.equal(isRemoteSourceUrl('http://8.8.8.8/test.js'), false)
+  assert.deepEqual(parseRemoteSources([{ ...rows[0], url: 'http://192.168.2.9:19528/test.js' }]), [{ ...rows[0], url: 'http://192.168.2.9:19528/test.js' }])
   const apis = storage(undefined)
   const local = await apis.importApi(script)
   apis.applyRemoteSources([{ ...rows[0], script }])
   apis.applyRemoteSources([{ ...rows[0], script: script.replace('Local Test', 'Updated') }])
-  assert.deepEqual(apis.getUserApis().map(x => x.id), [local.id, 'user_api_subscription_test'])
+  assert.deepEqual(apis.getUserApis().map(x => x.id), [local.id])
+  assert.equal(apis.getUserApis()[0].subscriptionSourceId, 'test')
+})
+test('subscription claims identical manual imports and removes existing duplicate entries', async() => {
+  const manualId = 'user_api_manual'
+  const subscriptionId = 'user_api_subscription_test'
+  const apis = storage([
+    { id: manualId, name: '手动导入', script },
+    { id: subscriptionId, name: '订阅重复项', script },
+  ])
+  const rows = [{ id: 'test', name: '订阅名称', url: 'https://example.com/test.js', script }]
+
+  const result = apis.applyRemoteSources(rows)
+  assert.equal(result.length, 1)
+  assert.equal(result[0].id, manualId)
+  assert.equal(result[0].name, '订阅名称')
+  assert.equal(result[0].subscriptionSourceId, 'test')
+  assert.equal(await apis.getScript(manualId), script)
+
+  const updatedScript = script.replace('@version 1', '@version 2')
+  const updated = apis.applyRemoteSources([{ ...rows[0], script: updatedScript }])
+  assert.equal(updated.length, 1)
+  assert.equal(updated[0].id, manualId)
+  assert.equal(await apis.getScript(manualId), updatedScript)
 })
 test('failover is ordered, bounded, stops on success and cancels on selection change', async() => {
   const { runUserApiFailover } = loader()('src/common/sources/user/failover.ts')
@@ -120,6 +149,37 @@ test('blank subscription performs no network request; invalid downloads preserve
   assert.deepEqual(apis.getUserApis().map(x => x.id), [imported.id])
 })
 
+test('startup automatically refreshes a saved subscription and reloads automatic mode', async() => {
+  const userApi = {list: [], status: true, apis: {kw: {}}}
+  const appSetting = {'common.sourceListUrl': 'http://192.168.2.9:19528/sources.json', 'common.apiSource': 'user_api_auto'}
+  const nextList = [{id: 'user_api_subscription_test'}]
+  let refreshes = 0
+  let activations = 0
+  let loaded = 'old'
+  let expected = 'old'
+  const startup = loader({
+    '@renderer/store': {userApi},
+    '@renderer/store/setting': {appSetting},
+    '@renderer/utils/ipc': {refreshUserApiSources: async url => {refreshes++; assert.equal(url, appSetting['common.sourceListUrl']); return {updated: true, list: nextList}}},
+    '@renderer/core/userApiFailover': {
+      activateAutoUserApi: async() => {activations++},
+      isAutoUserApiSource: id => id === 'user_api_auto',
+      loadImportedUserApi: async() => assert.fail('automatic mode must not load a fixed source'),
+      setExpectedLoadId: value => {expected = value},
+      setLoadedUserApiId: value => {loaded = value},
+    },
+    '@common/sources/user/ids': {isImportedUserApiId: id => id.startsWith('user_api_')},
+  })('src/renderer/core/useApp/sourceSubscriptionSync.ts')
+  assert.equal(await startup.syncSourceSubscriptionOnStartup(), true)
+  assert.equal(refreshes, 1)
+  assert.equal(activations, 1)
+  assert.equal(loaded, null)
+  assert.equal(expected, null)
+  assert.deepEqual(userApi.list, nextList)
+  assert.equal(userApi.status, false)
+  assert.deepEqual(userApi.apis, {})
+})
+
 test('renderer retries only imported IDs in user order and leaves manual mode disabled', async() => {
   const userApi = { list: [{id: 'user_api_first'}, {id: 'user_api_second'}, {id: 'user_api_third'}], status: false, apis: {} }
   const appSetting = {'common.apiSource': 'user_api_auto'}
@@ -166,6 +226,27 @@ test('failed media sources stay excluded for the same song and reset for a new s
   state.notePlayingSong('kw:second')
   assert.equal(state.hasSourceFailed('user_api_first'), false)
 })
+test('adaptive source health promotes reliable fast sources and cools repeated failures', () => {
+  const oldStorage = global.localStorage
+  const values = new Map()
+  global.localStorage = {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+  }
+  try {
+    const health = loader()('src/common/sources/user/sourceHealth.ts')
+    health.resetSourceHealth()
+    health.recordSourceSuccess('fast', 400, 1_000)
+    health.recordSourceSuccess('slow', 8_000, 1_001)
+    health.recordSourceFailure('broken', 1_002)
+    health.recordSourceFailure('broken', 1_003)
+    assert.deepEqual(health.rankSourceIds(['unknown', 'slow', 'broken', 'fast'], 2_000), ['fast', 'slow', 'unknown', 'broken'])
+    health.recordSourceSuccess('broken', 200, 2_001)
+    assert.equal(health.getSourceHealth('broken').cooldownUntil, 0)
+  } finally {
+    global.localStorage = oldStorage
+  }
+})
 test('distribution check rejects a custom source payload', () => {
   const os = require('node:os')
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-distribution-test-'))
@@ -197,6 +278,7 @@ test('empty-source playback rejects with the import hint; expired media advances
       '@renderer/core/userApiFailover': {
         isAutoUserApiSource: () => automatic,
         getLoadedUserApiId: () => 'user_api_first',
+        scheduleUserApiBackgroundProbe: () => {},
         tryUserApiMusicUrlFailover: async() => {failoverCalls++; return {url: 'http://127.0.0.1/new.wav', type: '128k'}},
       },
     })('src/renderer/core/music/utils.ts')
@@ -223,11 +305,12 @@ test('subscription snapshots distinguish identical content, script updates and c
   assert.equal(await apis.hasRemoteSourceChanges([{...refs[0], name: 'Renamed'}]), true)
   const second = {...refs[0], id: 'second'}
   apis.applyRemoteSources([...refs, second])
-  apis.reorderApis(['user_api_subscription_second', local.id, 'user_api_subscription_test'])
+  apis.reorderApis(['user_api_subscription_second', local.id])
   assert.equal(await apis.hasRemoteSourceChanges([...refs, second]), false)
   assert.equal(await apis.hasRemoteSourceChanges([second, ...refs]), true)
   apis.applyRemoteSources([second])
-  assert.deepEqual(apis.getUserApis().map(x => x.id), ['user_api_subscription_second', local.id])
+  assert.deepEqual(apis.getUserApis().map(x => x.id), [local.id])
+  assert.equal(apis.getUserApis()[0].subscriptionSourceId, 'second')
 })
 test('unchanged remote content is not applied again; same script URL with changed content updates', async() => {
   const apis = storage(undefined)

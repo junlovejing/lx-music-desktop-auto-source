@@ -10,6 +10,29 @@ export interface RemoteSourceScript extends RemoteSourceRef {
 
 const REMOTE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
 
+const isPrivateIpv4 = (hostname: string) => {
+  const parts = hostname.split('.').map(Number)
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return false
+  return parts[0] === 10 ||
+    parts[0] === 127 ||
+    (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+    (parts[0] === 192 && parts[1] === 168)
+}
+
+/** Public subscriptions require HTTPS; HTTP is limited to loopback and RFC1918 LAN hosts. */
+export const isRemoteSourceUrl = (value: string) => {
+  if (!value || value.length > 2_000) return false
+  try {
+    const url = new URL(value)
+    if (url.protocol === 'https:') return true
+    if (url.protocol !== 'http:') return false
+    const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+    return hostname === 'localhost' || hostname === '::1' || hostname.endsWith('.localhost') || isPrivateIpv4(hostname)
+  } catch {
+    return false
+  }
+}
+
 export const parseRemoteSources = (payload: unknown): RemoteSourceRef[] | null => {
   const data = typeof payload === 'string'
     ? safeJson(payload)
@@ -24,7 +47,7 @@ export const parseRemoteSources = (payload: unknown): RemoteSourceRef[] | null =
     const row = item as { id?: unknown, name?: unknown, url?: unknown }
     if (typeof row.id !== 'string' || !REMOTE_ID_RE.test(row.id)) return null
     if (typeof row.name !== 'string' || !row.name.trim() || row.name.trim().length > 80) return null
-    if (typeof row.url !== 'string' || !/^https:\/\/.{1,2000}$/.test(row.url)) return null
+    if (typeof row.url !== 'string' || !isRemoteSourceUrl(row.url)) return null
     if (seen.has(row.id)) return null
     seen.add(row.id)
     list.push({ id: row.id, name: row.name.trim(), url: row.url })
@@ -83,7 +106,7 @@ export const hasSourceFailed = (id: string) => failedSourceIds.has(id)
 /** Automatic checks are single-use for this song and rate-limited across songs. */
 export const claimSubscriptionCheck = (address: string, now = Date.now()): boolean => {
   const url = address.trim()
-  if (!url || !/^https:\/\//i.test(url) || checkedSubscriptions.has(url)) return false
+  if (!isRemoteSourceUrl(url) || checkedSubscriptions.has(url)) return false
   const previous = lastSubscriptionChecks.get(url)
   if (previous != null && now - previous < 60_000) return false
   checkedSubscriptions.add(url)

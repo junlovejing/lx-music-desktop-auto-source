@@ -12,7 +12,8 @@ import { langS2T, toNewMusicInfo, toOldMusicInfo } from '@renderer/utils'
 import { requestMsg } from '@renderer/utils/message'
 import { notePlayingSong, songKeyOf, hasSourceFailed } from '@common/sources/user/failover'
 import { apis } from '@renderer/utils/musicSdk/api-source'
-import { isAutoUserApiSource, tryUserApiMusicUrlFailover, getLoadedUserApiId } from '@renderer/core/userApiFailover'
+import { isAutoUserApiSource, tryUserApiMusicUrlFailover, getLoadedUserApiId, scheduleUserApiBackgroundProbe } from '@renderer/core/userApiFailover'
+import { recordSourceFailure, recordSourceSuccess } from '@common/sources/user/sourceHealth'
 
 
 const getOtherSourcePromises = new Map()
@@ -313,18 +314,29 @@ export const handleGetOnlineMusicUrl = async({ musicInfo, quality, onToggleSourc
   const targetQuality = quality ?? getPlayQuality(appSetting['player.playQuality'], musicInfo)
 
   const tryOnce = async(): Promise<{ url: string, type: LX.Quality }> => {
+    const sourceId = getLoadedUserApiId() ?? ''
+    const started = Date.now()
     let reqPromise
     try {
       reqPromise = musicSdk[musicInfo.source].getMusicUrl(toOldMusicInfo(musicInfo), targetQuality).promise
     } catch (err: any) {
       reqPromise = Promise.reject(err)
     }
-    return reqPromise
+    try {
+      const result = await reqPromise
+      if (!result?.url || !/^https?:\/\//i.test(result.url)) throw new Error('invalid music url')
+      recordSourceSuccess(sourceId, Date.now() - started)
+      return result
+    } catch (err) {
+      recordSourceFailure(sourceId)
+      throw err
+    }
   }
 
   const advanceSource = isAutoUserApiSource() && (isRefresh || hasSourceFailed(getLoadedUserApiId() ?? ''))
   const request = advanceSource ? tryUserApiMusicUrlFailover(tryOnce) : tryOnce()
   return request.then(({ url, type }: { url: string, type: LX.Quality }) => {
+    scheduleUserApiBackgroundProbe(tryOnce)
     return { musicInfo, url, quality: type, isFromCache: false }
   }).catch(async(err: any) => {
     console.log(err)
@@ -332,6 +344,7 @@ export const handleGetOnlineMusicUrl = async({ musicInfo, quality, onToggleSourc
     if (isAutoUserApiSource()) {
       try {
         const result = await tryUserApiMusicUrlFailover(tryOnce)
+        scheduleUserApiBackgroundProbe(tryOnce)
         return { musicInfo, url: result.url, quality: result.type, isFromCache: false }
       } catch (failoverErr: any) {
         console.log('[userApi failover]', failoverErr?.message ?? failoverErr)

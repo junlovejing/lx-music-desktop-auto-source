@@ -1,6 +1,7 @@
 import { request } from '@common/utils/request'
 import {
   isUserApiScriptText,
+  isRemoteSourceUrl,
   parseRemoteSources,
 } from '@common/sources/user/failover'
 import { applyRemoteSources, getUserApis, hasRemoteSourceChanges } from './utils'
@@ -23,7 +24,7 @@ const fetchOnce = async(url: string) => {
 const refreshNow = async(address: string): Promise<LX.UserApi.RefreshUserApiResult> => {
   const current = getUserApis()
   const url = address.trim()
-  if (!url || !/^https:\/\//i.test(url)) return { updated: false, list: current }
+  if (!isRemoteSourceUrl(url)) return { updated: false, list: current }
   try {
     const refs = parseRemoteSources(await fetchOnce(url))
     if (!refs) return { updated: false, list: current }

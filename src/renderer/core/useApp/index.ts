@@ -15,6 +15,7 @@ import usePlayer from './usePlayer'
 import useSettingSync from './useSettingSync'
 import { useRouter } from '@common/utils/vueRouter'
 import handleListAutoUpdate from './listAutoUpdate'
+import { syncSourceSubscriptionOnStartup } from './sourceSubscriptionSync'
 
 
 export default () => {
@@ -71,6 +72,7 @@ export default () => {
       sendInited()
 
       handleListAutoUpdate()
+      void syncSourceSubscriptionOnStartup()
       // fork：冷启动不自动检查官方更新。手动检查仍在设置-更新和更新弹窗。
     })
   })

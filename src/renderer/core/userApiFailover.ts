@@ -7,6 +7,7 @@ import {
   isImportedUserApiId,
 } from '@common/sources/user/ids'
 import { runUserApiFailover, markSourceFailed, hasSourceFailed, getPlayingSongKey } from '@common/sources/user/failover'
+import { pickSourceToProbe, rankSourceIds, recordSourceFailure } from '@common/sources/user/sourceHealth'
 
 /** 当前隐藏窗口里实际 load 的导入源。自动模式下不等于设置里的 user_api_auto */
 let loadedUserApiId: string | null = null
@@ -15,6 +16,9 @@ let expectedLoadId: string | null = null
 let initGeneration = 0
 let loadChain: Promise<unknown> = Promise.resolve()
 let failoverDepth = 0
+let probeTimer: ReturnType<typeof setTimeout> | null = null
+let probeRunning = false
+let lastProbeSongKey = ''
 /** 当前这扇初始化门闩最后一次结束时是不是成功。失败或超时记成 false。 */
 let initGateOpen = false
 
@@ -33,13 +37,13 @@ export const setLoadedUserApiId = (id: string | null) => {
 export const getImportedUserApiIds = (): string[] => userApi.list.map(api => api.id).filter(isImportedUserApiId)
 
 export const resolveInitialUserApiId = (): string => {
-  const ids = getImportedUserApiIds()
+  const ids = rankSourceIds(getImportedUserApiIds())
   return ids[0] ?? ''
 }
 
 /** Preserve the order configured by the user. */
 export const getUserApiFailoverOrder = (exclude: string[] = []): string[] => {
-  return getImportedUserApiIds().filter(id => !exclude.includes(id) && !hasSourceFailed(id))
+  return rankSourceIds(getImportedUserApiIds()).filter(id => !exclude.includes(id) && !hasSourceFailed(id))
 }
 
 export const isAutoUserApiSource = (apiId = appSetting['common.apiSource']) => {
@@ -118,9 +122,14 @@ export const loadImportedUserApi = async(apiId: string) => enqueueUserApiTask(as
   userApi.status = false
   userApi.message = 'initing'
   setLoadedUserApiId(null)
-  await setUserApiAction(apiId)
-  const ok = await waitApiReady()
-  if (!ok) throw new Error('source init failed')
+  try {
+    await setUserApiAction(apiId)
+    const ok = await waitApiReady()
+    if (!ok) throw new Error('source init failed')
+  } catch (err) {
+    recordSourceFailure(apiId)
+    throw err
+  }
   setLoadedUserApiId(apiId)
   if (appSetting['common.apiSource'] === USER_API_AUTO_ID) apiSource.value = USER_API_AUTO_ID
   return true
@@ -132,7 +141,7 @@ export const activateAutoUserApi = async() => {
   if (!id) throw new Error('no imported source')
   failoverDepth++
   try {
-    for (const candidate of getImportedUserApiIds()) {
+    for (const candidate of rankSourceIds(getImportedUserApiIds())) {
       try {
         await loadImportedUserApi(candidate)
         return
@@ -205,4 +214,46 @@ export const tryUserApiMusicUrlFailover = async(
   } finally {
     failoverDepth--
   }
+}
+
+/**
+ * The current track already owns a playable URL, so one delayed request can safely
+ * measure another source without producing sound. Only one probe runs per track.
+ */
+export const scheduleUserApiBackgroundProbe = (
+  tryOnce: () => Promise<{ url: string, type: LX.Quality }>,
+) => {
+  if (!isAutoUserApiSource()) return
+  const songKey = getPlayingSongKey()
+  if (!songKey || songKey === lastProbeSongKey) return
+  lastProbeSongKey = songKey
+  if (probeTimer) clearTimeout(probeTimer)
+  probeTimer = setTimeout(() => {
+    probeTimer = null
+    if (probeRunning || !isAutoUserApiSource() || getPlayingSongKey() !== songKey) return
+    const candidate = pickSourceToProbe(getImportedUserApiIds(), getLoadedUserApiId() ?? '')
+    if (!candidate) return
+    probeRunning = true
+    failoverDepth++
+    void (async() => {
+      try {
+        await loadImportedUserApi(candidate)
+        if (getPlayingSongKey() !== songKey || !isAutoUserApiSource()) return
+        await tryOnce()
+      } catch (err) {
+        console.log('[userApi health probe]', candidate, err)
+      } finally {
+        try {
+          if (getPlayingSongKey() === songKey && isAutoUserApiSource()) {
+            const best = rankSourceIds(getImportedUserApiIds())[0]
+            if (best && best !== getLoadedUserApiId()) await loadImportedUserApi(best)
+          }
+        } catch (err) {
+          console.log('[userApi health probe] restore failed', err)
+        }
+        failoverDepth--
+        probeRunning = false
+      }
+    })()
+  }, 12_000)
 }

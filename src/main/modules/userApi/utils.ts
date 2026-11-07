@@ -34,34 +34,83 @@ export const getUserApis = (): LX.UserApi.UserApiInfo[] => {
 
 const remoteCatalogOf = (remote: RemoteSourceScript[]) => remote.map(({ id, name, url }) => ({ id, name, url }))
 
+const subscriptionSourceIdOf = (api: LX.UserApi.UserApiInfo) => {
+  if (api.subscriptionSourceId) return api.subscriptionSourceId
+  const prefix = 'user_api_subscription_'
+  return api.id.startsWith(prefix) ? api.id.slice(prefix.length) : null
+}
+
+const storedScriptMatches = (stored: string | undefined, script: string) => {
+  return stored === script || stored === deflateScriptSync(script)
+}
+
 /** Compare script contents too: a stable URL can serve an updated script. */
 export const hasRemoteSourceChanges = async(remote: RemoteSourceScript[]) => {
   const list = getUserApis()
   const previous = getStore(STORE_NAMES.USER_API).get('sourceCatalog') as unknown
   if (JSON.stringify(previous) !== JSON.stringify(remoteCatalogOf(remote))) return true
   for (const item of remote) {
-    const id = subscriptionUserApiId(item.id)
-    const local = list.find(api => api.id === id)
-    if (!local || local.name !== item.name || local.scriptUrl !== item.url || await getScript(id) !== item.script) return true
+    const candidates: LX.UserApi.UserApiInfo[] = []
+    for (const api of list) {
+      const subscriptionSourceId = subscriptionSourceIdOf(api)
+      if (subscriptionSourceId === item.id || (subscriptionSourceId == null && await getScript(api.id) === item.script)) {
+        candidates.push(api)
+      }
+    }
+    if (candidates.length !== 1) return true
+    const local = candidates[0]
+    if (local.subscriptionSourceId !== item.id || local.name !== item.name || local.scriptUrl !== item.url || await getScript(local.id) !== item.script) return true
   }
   return false
 }
 
-/** Subscription updates replace matching subscription IDs, preserving local imports and order. */
+/** Subscription updates claim identical manual imports, preserving their local ID and order. */
 export const applyRemoteSources = (remote: RemoteSourceScript[]) => {
   getUserApis()
-  const remoteIds = new Set(remote.map(item => subscriptionUserApiId(item.id)))
-  userApis = userApis!.filter(api => {
-    if (!api.id.startsWith('user_api_subscription_') || remoteIds.has(api.id)) return true
+  const remoteIds = new Set(remote.map(item => item.id))
+  userApis = userApis!.flatMap(api => {
+    const subscriptionSourceId = subscriptionSourceIdOf(api)
+    if (subscriptionSourceId == null || remoteIds.has(subscriptionSourceId)) return [api]
+    if (api.subscriptionClaimedManual) {
+      const { subscriptionSourceId: _subscriptionSourceId, subscriptionClaimedManual: _subscriptionClaimedManual, scriptUrl: _scriptUrl, ...manualInfo } = api
+      return [{ ...manualInfo, allowShowUpdateAlert: true }]
+    }
     scripts.delete(api.id)
-    return false
+    return []
   })
   for (const item of remote) {
-    const id = subscriptionUserApiId(item.id)
-    const info = { ...parseScriptInfo(item.script), id, name: item.name, scriptUrl: item.url, allowShowUpdateAlert: false }
-    const index = userApis.findIndex(api => api.id === id)
-    if (index < 0) userApis.push(info)
-    else userApis[index] = info
+    const candidates: number[] = []
+    for (let index = 0; index < userApis.length; index++) {
+      const api = userApis[index]
+      const subscriptionSourceId = subscriptionSourceIdOf(api)
+      if (subscriptionSourceId === item.id || (subscriptionSourceId == null && storedScriptMatches(scripts.get(api.id), item.script))) {
+        candidates.push(index)
+      }
+    }
+
+    const manualIndex = candidates.find(index => subscriptionSourceIdOf(userApis![index]) == null)
+    const keepIndex = manualIndex ?? candidates[0]
+    const keptApi = keepIndex == null ? null : userApis[keepIndex]
+    const id = keptApi?.id ?? subscriptionUserApiId(item.id)
+    const info = {
+      ...parseScriptInfo(item.script),
+      id,
+      name: item.name,
+      scriptUrl: item.url,
+      subscriptionSourceId: item.id,
+      subscriptionClaimedManual: keptApi?.subscriptionClaimedManual === true || (keptApi != null && subscriptionSourceIdOf(keptApi) == null),
+      allowShowUpdateAlert: false,
+    }
+
+    for (let index = candidates.length - 1; index >= 0; index--) {
+      const duplicateIndex = candidates[index]
+      if (duplicateIndex === keepIndex) continue
+      scripts.delete(userApis[duplicateIndex].id)
+      userApis.splice(duplicateIndex, 1)
+    }
+    const currentIndex = userApis.findIndex(api => api.id === id)
+    if (currentIndex < 0) userApis.push(info)
+    else userApis[currentIndex] = info
     scripts.set(id, deflateScriptSync(item.script))
   }
   saveData()
