@@ -87,7 +87,9 @@ import ListSortModal from './components/ListSortModal.vue'
 import ListUpdateModal from './components/ListUpdateModal.vue'
 
 import { defaultList, loveList, userLists, fetchingListStatus } from '@renderer/store/list/state'
-import { removeUserList } from '@renderer/store/list/action'
+import { getListMusics, removeUserList } from '@renderer/store/list/action'
+import { setTogglePlayMode } from '@renderer/store/setting'
+import { playList } from '@renderer/core/player'
 
 import { ref, watch } from '@common/utils/vueTools'
 import { useRouter } from '@common/utils/vueRouter'
@@ -164,6 +166,13 @@ export default {
       })
     }
 
+    const handleRandomPlay = async(listInfo) => {
+      const list = await getListMusics(listInfo.id)
+      if (!list.length) return
+      setTogglePlayMode('random')
+      playList(listInfo.id, Math.floor(Math.random() * list.length))
+    }
+
     const {
       menus,
       menuLocation,
@@ -181,6 +190,7 @@ export default {
       handleDuplicateList,
       handleRename,
       handleRemove,
+      handleRandomPlay,
     })
 
     const handleListsItemRigthClick = (event, index) => {

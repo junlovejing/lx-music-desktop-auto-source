@@ -15,6 +15,7 @@ export default ({
   handleExportList,
   handleUpdateSourceList,
   handleRemove,
+  handleRandomPlay,
 }) => {
   const menuControl = reactive({
     rename: true,
@@ -33,6 +34,10 @@ export default ({
 
   const menus = computed(() => {
     return [
+      {
+        name: t('lists__play_random'),
+        action: 'randomPlay',
+      },
       {
         name: t('lists__rename'),
         action: 'rename',
@@ -152,6 +157,9 @@ export default ({
     if (!action) return
     const listInfo = getListInfo(index)
     switch (action.action) {
+      case 'randomPlay':
+        handleRandomPlay(listInfo)
+        break
       case 'rename':
         handleRename(index)
         break

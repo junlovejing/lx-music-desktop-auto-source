@@ -160,6 +160,7 @@
   "lists__remove_tip": "\"{name}\"을(를) 정말 삭제하시겠습니까?",
   "lists__remove_tip_button": "예, 맞습니다",
   "lists__rename": "이름 변경",
+  "lists__play_random": "셔플 재생 시작",
   "lists__select_local_file": "로컬 곡 추가",
   "lists__sort_list": "곡 정렬",
   "lists__source_detail": "재생목록 페이지",

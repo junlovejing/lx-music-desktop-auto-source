@@ -160,6 +160,7 @@
   "lists__remove_tip": "Do you really want to remove \"{name}\"?",
   "lists__remove_tip_button": "Yes, that's right",
   "lists__rename": "Rename",
+  "lists__play_random": "Start shuffle",
   "lists__select_local_file": "Add Local Songs",
   "lists__sort_list": "Sort Songs",
   "lists__source_detail": "Playlist Page",

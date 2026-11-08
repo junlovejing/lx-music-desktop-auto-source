@@ -160,6 +160,7 @@
   "lists__remove_tip": "你真的想要移除「{name}」吗？",
   "lists__remove_tip_button": "是的，没错",
   "lists__rename": "重命名",
+  "lists__play_random": "开始随机播放",
   "lists__select_local_file": "添加本地歌曲",
   "lists__sort_list": "排序歌曲",
   "lists__source_detail": "歌单详情页",
